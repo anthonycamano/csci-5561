@@ -6,16 +6,19 @@ import matplotlib.pyplot as plt
 Do not change the input/output of each function, and do not remove the provided functions.
 '''
 
+### Resources:
+## https://www.youtube.com/watch?v=XmO0CSsKg88 - not super helpful and he seemed to exccited for no reason
+
+
 def get_differential_filter():
     filter_x, filter_y = None, None
     ## Using what i assume is a basic differential filter, maybe switch to sobel later?
-    filter_x = np.array([[-1, 0, 1],
-                         [-1, 0, 1],
-                         [-1, 0, 1]]);
-    
-    filter_y = np.array([[1, 1, 1],
-                         [0, 0, 0],
-                         [-1, -1, -1]])
+    filter_x = np.array([[-1, 0, 1], 
+                         [-2, 0, 2], 
+                         [-1, 0, 1]])
+    filter_y = np.array([[-1, -2, -1], 
+                         [0, 0, 0], 
+                         [1, 2, 1]])
 
     return filter_x, filter_y
 
@@ -44,22 +47,14 @@ def filter_image(image, filter):
 
 def get_gradient(image_dx, image_dy):
     grad_mag, grad_angle = None, None
+
     ## we start with getting magnitude which is just the pythagorean theorem
     grad_mag = np.sqrt(image_dx**2 + image_dy**2)
     
     ## getting angle so that we can bin it later
-    grad_angle = np.arctan2(image_dy, image_dx)
+    grad_angle = np.atan2(image_dy, image_dx) + np.pi;
     
-    ## convert to unsigned angles [0, π)
-    ## Original angle (arctan2) → Unsigned angle (% π)
-    ## -π     (-180°) → 0     (0°)
-    ## -π/2   (-90°)  → π/2   (90°)
-    ## -π/4   (-45°)  → 3π/4  (135°)
-    ## 0      (0°)    → 0     (0°)
-    ## π/4    (45°)   → π/4   (45°)
-    ## π/2    (90°)   → π/2   (90°)
-    ## 3π/4   (135°)  → 3π/4  (135°)
-    ## π      (180°)  → 0     (0°)
+    ## converting to unsigned angles [0, π) as per the hadnout
     grad_angle = grad_angle % np.pi
 
     return grad_mag, grad_angle
@@ -72,31 +67,26 @@ def build_histogram(grad_mag, grad_angle, cell_size):
     M = m // cell_size  ## # of cells in y direction
     N = n // cell_size  ## # of cells in x direction
     
-    # histogram tensor: M x N x 6 bins (as mentioned in the handout)
+    ## histogram tensor: M(vertial) x N(Horixontal) x 6 bins (as mentioned in the handout)
     ori_histo = np.zeros((M, N, 6))
     
-    # Define bin edges for 6 bins covering [0, π)
-    # Each bin covers π/6 = 30 degrees
-    bin_edges = np.linspace(0, np.pi, 7)  # 7 edges for 6 bins
-    
-    # Process each cell
     for i in range(M):
         for j in range(N):
-            # Define cell boundaries
+            ## define the cell bounds
             y_start = i * cell_size
             y_end = y_start + cell_size
             x_start = j * cell_size
             x_end = x_start + cell_size
             
-            # Extract cell data
+            ## we need the mag and angle of each cell
             cell_mag = grad_mag[y_start:y_end, x_start:x_end]
             cell_angle = grad_angle[y_start:y_end, x_start:x_end]
             
-            # Build histogram for this cell
+            ## Build histogram for this cell
             for bin_idx in range(6):
-                # Define angle range for this bin
+                ## Define angle range for this bin
                 if bin_idx == 0:
-                    # First bin: [165°, 180°) ∪ [0°, 15°)
+                    ## First bin: [165°, 180°) ∪ [0°, 15°)
                     angle_min1 = 11 * np.pi / 12  # 165°
                     angle_max1 = np.pi            # 180°
                     angle_min2 = 0                # 0°
@@ -106,12 +96,12 @@ def build_histogram(grad_mag, grad_angle, cell_size):
                     mask2 = (cell_angle >= angle_min2) & (cell_angle < angle_max2)
                     mask = mask1 | mask2
                 else:
-                    # Other bins: regular intervals
-                    angle_min = (bin_idx * 2 - 1) * np.pi / 12  # 15°, 45°, 75°, 105°, 135°
-                    angle_max = (bin_idx * 2 + 1) * np.pi / 12  # 45°, 75°, 105°, 135°, 165°
+                    ## Other bins: regular intervals
+                    angle_min = (bin_idx * 2 - 1) * np.pi / 12  ## 15°, 45°, 75°, 105°, 135°
+                    angle_max = (bin_idx * 2 + 1) * np.pi / 12  ## 45°, 75°, 105°, 135°, 165°
                     mask = (cell_angle >= angle_min) & (cell_angle < angle_max)
                 
-                # Sum magnitudes for pixels in this bin
+                ## Sum magnitudes for pixels in this bin
                 ori_histo[i, j, bin_idx] = np.sum(cell_mag[mask])
 
     return ori_histo
@@ -119,27 +109,186 @@ def build_histogram(grad_mag, grad_angle, cell_size):
 
 def get_block_descriptor(ori_histo, block_size):
     ori_histo_normalized = None
-    # To do
+
+    M, N, num_bins = ori_histo.shape
+    
+    ## Calculate output dimensions (blocks slide with stride 1)
+    ## maybe check to see what effects changing stride has later on or ask in class
+    output_M = M - block_size + 1  
+    output_N = N - block_size + 1  
+    
+    ## Each block contains block_size^2 cells, each with num_bins values
+    block_feature_size = block_size * block_size * num_bins
+    
+    ## init output tensor
+    ori_histo_normalized = np.zeros((output_M, output_N, block_feature_size))
+    
+    ## just setting e as the constant mentioned in the handlout
+    e = 0.001
+    
+    ## Process each of the blocks we have
+    for i in range(output_M):
+        for j in range(output_N):
+            ## extract block: block_size x block_size x num_bins
+            block = ori_histo[i:i+block_size, j:j+block_size, :]
+            
+            ## flatten block into 1D vector (concatenate all histograms) this is the zipping srot of thing from the video
+            block_vector = block.flatten()
+            
+            ## normalization: h_normalized = h / sqrt(sum(h^2) + e^2)
+            norm = np.sqrt(np.sum(block_vector**2) + e**2)
+            block_normalized = block_vector / norm
+            
+            ## store in orihisto_normalized
+            ori_histo_normalized[i, j, :] = block_normalized
+
     return ori_histo_normalized
 
 
 def extract_hog(image, cell_size=8, block_size=2):
-    # convert grey-scale image to double format
-    image = image.astype('float') / 255.0
     hog = None
-    # To do
+    
+    ## following the steps in the handout here - reminder to review this when studying, a lot of good info in hadnout
+    ## Convert the grayscale image to float format and normalize to range [0, 1].
+    image = image.astype('float') / 255.0
+
+    ## Get differential images using get_differential_filter and filter_image
+    filter_x, filter_y = get_differential_filter()
+    image_dx = filter_image(image, filter_x)
+    image_dy = filter_image(image, filter_y)
+
+    ## Compute the gradients using get_gradient
+    grad_mag, grad_angle = get_gradient(image_dx, image_dy)
+
+    ## Build the histogram of oriented gradients for all cells using build_histogram
+    ori_histo = build_histogram(grad_mag, grad_angle, cell_size)
+
+    ## Build the descriptor of all blocks with normalization using get_block_descriptor
+    ori_histo_normalized = get_block_descriptor(ori_histo, block_size)
+
+    ## Return a long vector (hog) by concatenating all block descriptors.
+    hog = ori_histo_normalized.flatten()
+
     return hog
 
+def non_maximum_suppression(candidates, box_w, box_h, iou_threshold=0.5):
+   
+    if len(candidates) == 0:
+        return np.array([]).reshape(0, 3)
+    
+    # Sort by confidence score (descending)
+    indices = np.argsort(candidates[:, 2])[::-1]
+    candidates = candidates[indices]
+    
+    keep = []
+    
+    while len(candidates) > 0:
+        # Keep the detection with highest score
+        current = candidates[0]
+        keep.append(current)
+        
+        if len(candidates) == 1:
+            break
+        
+        # Calculate IoU with remaining detections
+        remaining = candidates[1:]
+        ious = []
+        
+        for other in remaining:
+            iou = calculate_iou(current[0], current[1], box_w, box_h,
+                               other[0], other[1], box_w, box_h)
+            ious.append(iou)
+        
+        # Remove detections with high IoU
+        ious = np.array(ious)
+        keep_mask = ious < iou_threshold
+        candidates = remaining[keep_mask]
+    
+    return np.array(keep) if keep else np.array([]).reshape(0, 3)
+
+def calculate_iou(x1, y1, w1, h1, x2, y2, w2, h2):
+    # Calculate intersection rectangle
+    left = max(x1, x2)
+    top = max(y1, y2)
+    right = min(x1 + w1, x2 + w2)
+    bottom = min(y1 + h1, y2 + h2)
+    
+    # Check if there's no intersection
+    if left >= right or top >= bottom:
+        return 0.0
+    
+    # Calculate areas
+    intersection_area = (right - left) * (bottom - top)
+    area1 = w1 * h1
+    area2 = w2 * h2
+    union_area = area1 + area2 - intersection_area
+    
+    # Avoid division by zero
+    if union_area == 0:
+        return 0.0
+    
+    return intersection_area / union_area
 
 def face_detection(I_target, I_template):
-    bounding_boxes = None
-    # To do
-    return  bounding_boxes
-
+    """
+    Fixed face detection with proper sliding window approach
+    """
+    # Get dimensions
+    template_h, template_w = I_template.shape
+    target_h, target_w = I_target.shape
+    
+    # Check if template fits in target
+    if template_h > target_h or template_w > target_w:
+        return np.array([]).reshape(0, 3)
+    
+    # Extract HOG descriptor from template (do this once)
+    template_hog = extract_hog(I_template)
+    template_hog_normalized = template_hog - np.mean(template_hog)
+    
+    candidates = []
+    
+    # Use a reasonable step size to balance accuracy and speed
+    step_size = 4  # Move by 8 pixels at a time (one cell size)
+    
+    # Slide template across target image
+    for y in range(0, target_h - template_h + 1, step_size):
+        for x in range(0, target_w - template_w + 1, step_size):
+            # Extract patch from target image
+            patch = I_target[y:y+template_h, x:x+template_w]
+            
+            # Extract HOG from patch
+            patch_hog = extract_hog(patch)
+            patch_hog_normalized = patch_hog - np.mean(patch_hog)
+            
+            # Compute NCC score
+            numerator = np.dot(template_hog_normalized, patch_hog_normalized)
+            denominator = (np.linalg.norm(template_hog_normalized) * 
+                          np.linalg.norm(patch_hog_normalized))
+            
+            if denominator > 0:
+                ncc_score = numerator / denominator
+            else:
+                ncc_score = 0
+            
+            # Use lower threshold since we're using step size
+            threshold = 0.3  # Lower threshold to catch more candidates
+            if ncc_score > threshold:
+                candidates.append([int(x), int(y), ncc_score])
+    
+    if len(candidates) == 0:
+        return np.array([]).reshape(0, 3)
+    
+    candidates = np.array(candidates)
+    
+    # Apply Non-Maximum Suppression with more permissive IoU
+    # bounding_boxes = non_maximum_suppression(candidates, template_w, template_h, iou_threshold=0.01)
+    return candidates
+    
+    return bounding_boxes
 
 def face_detection_bonus(I_target, I_template):
     bounding_boxes = None
-    # To do
+    ## might skip this
     return  bounding_boxes
 
 
