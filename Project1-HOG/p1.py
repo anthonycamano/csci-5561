@@ -13,30 +13,37 @@ Do not change the input/output of each function, and do not remove the provided 
 def get_differential_filter():
     filter_x, filter_y = None, None
     ## Using what i assume is a basic differential filter, maybe switch to sobel later?
-    filter_x = np.array([[-1, 0, 1], 
-                         [-2, 0, 2], 
-                         [-1, 0, 1]])
-    filter_y = np.array([[-1, -2, -1], 
-                         [0, 0, 0], 
-                         [1, 2, 1]])
+    filter_x = np.array([
+    [1, 0, -1],
+    [2, 0, -2],
+    [1, 0, -1]
+    ])
+
+    filter_y = np.array([
+    [1, 2, 1],
+    [0, 0, 0],
+    [-1, -2, -1]
+    ])
+    
+    ## print to make sure we are actually getting correct values
+    # print(filter_x)
+    # print(filter_y)
 
     return filter_x, filter_y
 
 
 def filter_image(image, filter):
-    image_filtered = None
-
-    ## gettingimage dimensions
+    ## gettingimage amd filter dimensions
     m, n = image.shape
-    k = filter.shape[0]  ## square filter here but could be changed later
+    k = filter.shape[0]
     
-    ## padding image here
+    ## padding image here with 0s
     pad_size = k // 2
     image_padded = np.pad(image, pad_size, mode='constant', constant_values=0)
 
     image_filtered = np.zeros((m, n))
 
-    ## doing convolution step here -- I assume there is a less manual way to do this
+    ## copied from lect02 and updated for more readability
     for i in range(m):
         for j in range(n):
             patch = image_padded[i:i+k, j:j+k]
@@ -82,11 +89,11 @@ def build_histogram(grad_mag, grad_angle, cell_size):
             cell_mag = grad_mag[y_start:y_end, x_start:x_end]
             cell_angle = grad_angle[y_start:y_end, x_start:x_end]
             
-            ## Build histogram for this cell
+            ## build histogram with 6 bins
             for bin_idx in range(6):
-                ## Define angle range for this bin
+                ## define angle range for this bin
                 if bin_idx == 0:
-                    ## First bin: [165°, 180°) ∪ [0°, 15°)
+                    ## first bin: [165°, 180°) ∪ [0°, 15°) - this is the wrap around case
                     angle_min1 = 11 * np.pi / 12  # 165°
                     angle_max1 = np.pi            # 180°
                     angle_min2 = 0                # 0°
@@ -96,13 +103,18 @@ def build_histogram(grad_mag, grad_angle, cell_size):
                     mask2 = (cell_angle >= angle_min2) & (cell_angle < angle_max2)
                     mask = mask1 | mask2
                 else:
-                    ## Other bins: regular intervals
+                    ## other bins: [15°, 45°), [45°, 75°), [75°, 105°), [105°, 135°), [135°, 165°)
                     angle_min = (bin_idx * 2 - 1) * np.pi / 12  ## 15°, 45°, 75°, 105°, 135°
                     angle_max = (bin_idx * 2 + 1) * np.pi / 12  ## 45°, 75°, 105°, 135°, 165°
                     mask = (cell_angle >= angle_min) & (cell_angle < angle_max)
                 
                 ## Sum magnitudes for pixels in this bin
                 ori_histo[i, j, bin_idx] = np.sum(cell_mag[mask])
+
+    ## visual check to make sure histogram looks right
+    # plt.imshow(ori_histo[:, :, 0], cmap='gray')
+    # plt.colorbar()
+    # plt.show()
 
     return ori_histo
 
@@ -112,12 +124,12 @@ def get_block_descriptor(ori_histo, block_size):
 
     M, N, num_bins = ori_histo.shape
     
-    ## Calculate output dimensions (blocks slide with stride 1)
+    ## calc output dimensions (blocks slide with stride 1)
     ## maybe check to see what effects changing stride has later on or ask in class
     output_M = M - block_size + 1  
     output_N = N - block_size + 1  
     
-    ## Each block contains block_size^2 cells, each with num_bins values
+    ## each block has block_size^2 cells, each with num_bins values
     block_feature_size = block_size * block_size * num_bins
     
     ## init output tensor
@@ -133,17 +145,19 @@ def get_block_descriptor(ori_histo, block_size):
             block = ori_histo[i:i+block_size, j:j+block_size, :]
             
             ## flatten block into 1D vector (concatenate all histograms) this is the zipping srot of thing from the video
+            ## this is the numerator hsubi in the nprmalization formula they gave us
             block_vector = block.flatten()
             
-            ## normalization: h_normalized = h / sqrt(sum(h^2) + e^2)
+            ## this is the denominator in the normalization formula they gave us
             norm = np.sqrt(np.sum(block_vector**2) + e**2)
-            block_normalized = block_vector / norm
+
+            ## normalization: h_normalized = hsubi / sqrt(sum(h^2) + e^2)
+            block_normalized = block_vector / norm 
             
             ## store in orihisto_normalized
             ori_histo_normalized[i, j, :] = block_normalized
 
     return ori_histo_normalized
-
 
 def extract_hog(image, cell_size=8, block_size=2):
     hog = None
@@ -171,11 +185,64 @@ def extract_hog(image, cell_size=8, block_size=2):
 
     return hog
 
-def non_maximum_suppression(candidates, box_w, box_h, iou_threshold=0.5):
-   
-    if len(candidates) == 0:
-        return np.array([]).reshape(0, 3)
+def face_detection(I_target, I_template):
+    ## get template(obama) and target(whole image) dimensions
+    template_h, template_w = I_template.shape
+    target_h, target_w = I_target.shape
     
+    ## extract HOG descriptor from template (do this once)
+    template_hog = extract_hog(I_template)
+    template_hog_normalized = template_hog - np.mean(template_hog)
+    
+    candidates = []
+    
+    ## move by 8 pixels at a time (one cell size)
+    step_size = 2
+
+    y_range = range(0, target_h - template_h + 1, step_size)
+    x_range = range(0, target_w - template_w + 1, step_size)
+    
+    # Slide template across target image in steps of 8
+    for y in y_range:
+        for x in x_range:
+            ## rxtract patch from target image
+            patch = I_target[y:y+template_h, x:x+template_w]
+            
+            ## extract HOG from patch
+            patch_hog = extract_hog(patch)
+            patch_hog_normalized = patch_hog - np.mean(patch_hog)
+            
+            ## calc NCC (normalized cross-correlation) score using formula they gave us
+            numerator = np.dot(template_hog_normalized, patch_hog_normalized)
+            denominator = (np.linalg.norm(template_hog_normalized) * 
+                          np.linalg.norm(patch_hog_normalized))
+            
+            if denominator > 0:
+                ncc_score = numerator / denominator
+            else:
+                ncc_score = 0
+            
+
+            threshold = 0.45
+            if ncc_score > threshold :
+                candidates.append([int(x), int(y), ncc_score])
+
+    candidates = np.array(candidates)
+    # return candidates
+    
+    ## doing the nms
+    bounding_boxes = nms(candidates, template_w, template_h, iou_threshold=0.5)
+    
+    return bounding_boxes
+
+def face_detection_bonus(I_target, I_template):
+    bounding_boxes = None
+    ## might skip this
+    return  bounding_boxes
+
+# ----- Helper Functions for face detection -----
+## this is for non-maximum supression
+def nms(candidates, box_w, box_h, iou_threshold=0.5):
     # Sort by confidence score (descending)
     indices = np.argsort(candidates[:, 2])[::-1]
     candidates = candidates[indices]
@@ -206,6 +273,7 @@ def non_maximum_suppression(candidates, box_w, box_h, iou_threshold=0.5):
     
     return np.array(keep) if keep else np.array([]).reshape(0, 3)
 
+## this is for non-maximum supression - calcs the interesection of union
 def calculate_iou(x1, y1, w1, h1, x2, y2, w2, h2):
     # Calculate intersection rectangle
     left = max(x1, x2)
@@ -228,69 +296,6 @@ def calculate_iou(x1, y1, w1, h1, x2, y2, w2, h2):
         return 0.0
     
     return intersection_area / union_area
-
-def face_detection(I_target, I_template):
-    """
-    Fixed face detection with proper sliding window approach
-    """
-    # Get dimensions
-    template_h, template_w = I_template.shape
-    target_h, target_w = I_target.shape
-    
-    # Check if template fits in target
-    if template_h > target_h or template_w > target_w:
-        return np.array([]).reshape(0, 3)
-    
-    # Extract HOG descriptor from template (do this once)
-    template_hog = extract_hog(I_template)
-    template_hog_normalized = template_hog - np.mean(template_hog)
-    
-    candidates = []
-    
-    # Use a reasonable step size to balance accuracy and speed
-    step_size = 4  # Move by 8 pixels at a time (one cell size)
-    
-    # Slide template across target image
-    for y in range(0, target_h - template_h + 1, step_size):
-        for x in range(0, target_w - template_w + 1, step_size):
-            # Extract patch from target image
-            patch = I_target[y:y+template_h, x:x+template_w]
-            
-            # Extract HOG from patch
-            patch_hog = extract_hog(patch)
-            patch_hog_normalized = patch_hog - np.mean(patch_hog)
-            
-            # Compute NCC score
-            numerator = np.dot(template_hog_normalized, patch_hog_normalized)
-            denominator = (np.linalg.norm(template_hog_normalized) * 
-                          np.linalg.norm(patch_hog_normalized))
-            
-            if denominator > 0:
-                ncc_score = numerator / denominator
-            else:
-                ncc_score = 0
-            
-            # Use lower threshold since we're using step size
-            threshold = 0.3  # Lower threshold to catch more candidates
-            if ncc_score > threshold:
-                candidates.append([int(x), int(y), ncc_score])
-    
-    if len(candidates) == 0:
-        return np.array([]).reshape(0, 3)
-    
-    candidates = np.array(candidates)
-    
-    # Apply Non-Maximum Suppression with more permissive IoU
-    # bounding_boxes = non_maximum_suppression(candidates, template_w, template_h, iou_threshold=0.01)
-    return candidates
-    
-    return bounding_boxes
-
-def face_detection_bonus(I_target, I_template):
-    bounding_boxes = None
-    ## might skip this
-    return  bounding_boxes
-
 
 # ----- Visualization Functions -----
 def visualize_hog(image, hog, cell_size=8, block_size=2, num_bins=6):
@@ -356,10 +361,10 @@ def visualize_face_detection(I_target, bounding_boxes, box_size):
 if __name__=='__main__':
 
     # ----- HOG -----
-    image = Image.open('cameraman.tif')
-    image_array = np.array(image)
-    hog = extract_hog(image_array)
-    visualize_hog(image_array, hog, 8, 2)
+    # image = Image.open('cameraman.tif')
+    # image_array = np.array(image)
+    # hog = extract_hog(image_array)
+    # visualize_hog(image_array, hog, 8, 2)
 
     # ----- Face Detection -----
     I_target = Image.open('target.png')
