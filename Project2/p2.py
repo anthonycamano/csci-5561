@@ -15,7 +15,49 @@ def find_match(img1, img2):
     x1, x2 = None, None
     dis_thr = 0.7
     
-    # To do
+    # create sift object
+    sift = SIFT_create()
+
+    kp1, des1 = sift.detectAndCompute(img1, None)
+    kp2, des2 = sift.detectAndCompute(img2, None)
+
+    kp1 = KeyPoint_convert(kp1)
+    kp2 = KeyPoint_convert(kp2)
+
+    # Forward matching: img1 -> img2
+    neighbors = NearestNeighbors(n_neighbors=2, algorithm='auto').fit(des2)
+    distances, indices = neighbors.kneighbors(des1)
+
+    # Backward matching: img2 -> img1 (for cross-check)
+    neighbors_back = NearestNeighbors(n_neighbors=2, algorithm='auto').fit(des1)
+    distances_back, indices_back = neighbors_back.kneighbors(des2)
+
+    good_matches = []
+
+    for i in range(len(distances)):
+        dis_closest = distances[i][0]
+        dis_second = distances[i][1]
+        
+        if dis_second > 0 and (dis_closest / dis_second) < dis_thr:
+            j = indices[i][0]  # Best match in img2
+            
+            # Apply Lowe's ratio test for backward match as well
+            dis_back_closest = distances_back[j][0]
+            dis_back_second = distances_back[j][1]
+            
+            # Cross-check: verify that img2[j]'s best match is img1[i]
+            # AND that backward match also passes ratio test
+            if (indices_back[j][0] == i and 
+                dis_back_second > 0 and 
+                (dis_back_closest / dis_back_second) < dis_thr):
+                good_matches.append((i, j))
+    
+    x1 = np.zeros((len(good_matches), 2))
+    x2 = np.zeros((len(good_matches), 2))
+
+    for idx, (i, j) in enumerate(good_matches):
+        x1[idx] = kp1[i]
+        x2[idx] = kp2[j]
 
     return x1, x2
 
