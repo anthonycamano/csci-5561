@@ -40,7 +40,7 @@ def find_match(img1, img2):
         
         if dis_second > 0 and (dis_closest / dis_second) < dis_thr:
             j = indices[i][0]  # Best match in img2
-            
+
             # Apply Lowe's ratio test for backward match as well
             dis_back_closest = distances_back[j][0]
             dis_back_second = distances_back[j][1]
@@ -65,15 +65,80 @@ def find_match(img1, img2):
 def align_image_using_feature(x1, x2, ransac_thr, ransac_iter):
     A = None
 
-    # To do
+    n = x1.shape[0]
+    
+    # Need at least 3 points for affine transform
+    if n < 3:
+        return np.eye(3)
+    
+    best_inliers = []
+    best_A = None
+    
+    # RANSAC iterations
+    for iteration in range(ransac_iter):
+        # Step 1: Randomly sample 3 points
+        # np.random.choice returns indices
+        indices = np.random.choice(n, size=3, replace=False)
+        sample_x1 = x1[indices]
+        sample_x2 = x2[indices]
+        
+        # Step 2: Compute affine transform from these 3 points
+        A = compute_affine_transform(sample_x1, sample_x2)
+        
+        if A is None:
+            continue
+        
+        # Step 3: Transform all x1 points using this affine matrix
+        # Convert x1 to homogeneous coordinates (n x 3)
+        x1_h = np.hstack([x1, np.ones((n, 1))])
+        
+        # Transform: x2_pred = A * x1
+        # x2_pred will be (n x 3), we take first 2 columns
+        x2_pred = (A @ x1_h.T).T
+        x2_pred = x2_pred[:, :2]  # Remove homogeneous coordinate
+        
+        # Step 4: Compute errors (Euclidean distance)
+        # errors[i] = distance between predicted and actual point
+        errors = np.sqrt(np.sum((x2_pred - x2)**2, axis=1))
+        
+        # Step 5: Find inliers (points with error < threshold)
+        inliers = np.where(errors < ransac_thr)[0]
+        
+        # Step 6: Keep track of best model (one with most inliers)
+        if len(inliers) > len(best_inliers):
+            best_inliers = inliers
+            best_A = A
+    
+    # Step 7: Refine the affine transform using ALL inliers
+    # This gives better accuracy than using just 3 random points
+    if len(best_inliers) >= 3:
+        best_A = compute_affine_transform(x1[best_inliers], x2[best_inliers])
+    
+    # If RANSAC failed to find any good model, return identity
+    if best_A is None:
+        best_A = np.eye(3)
 
-    return A
+    return best_A
 
 
 def warp_image(img, A, output_size):
     img_warped = None
 
-    # To do
+    h_out, w_out = output_size
+    # Create grid of (x, y) coordinates in output image 
+    x_out, y_out = np.meshgrid(np.arange(w_out), np.arange(h_out))
+    coords_out = np.vstack([x_out.ravel(), y_out.ravel(), np.ones((h_out * w_out))])  # 3 x (h_out*w_out)
+    # Compute inverse mapping
+    A_inv = np.linalg.inv(A)
+    coords_in = A_inv @ coords_out  # 3 x (h_out*w_out)
+    coords_in = coords_in[:2, :] / coords_in[2, :]  # Normalize homogeneous coordinates
+    x_in = coords_in[0, :].reshape((h_out, w_out))
+    y_in = coords_in[1, :].reshape((h_out, w_out))
+    # Interpolate pixel values
+    interp_func = interpolate.RegularGridInterpolator(
+        (np.arange(img.shape[0]), np.arange(img.shape[1])), img, bounds_error=False, fill_value=0)
+    img_warped = interp_func(np.stack([y_in, x_in], axis=-1))
+    img_warped = img_warped.reshape((h_out, w_out, -1))
 
     return img_warped
 
@@ -93,6 +158,78 @@ def track_multi_frames(template, img_list):
     # To do
 
     return A_list, errors_list
+
+# ----- Helper Functions -----
+
+def compute_affine_transform(x1, x2):
+    """
+    Compute affine transformation matrix from point correspondences.
+    
+    Given correspondences x1 and x2, solve for A such that x2 = A * x1
+    where x1 and x2 are in homogeneous coordinates.
+    
+    Args:
+        x1: n x 2 matrix of source points
+        x2: n x 2 matrix of target points
+    
+    Returns:
+        A: 3 x 3 affine transformation matrix
+    """
+    n = x1.shape[0]
+    
+    # We need at least 3 points for affine transformation
+    if n < 3:
+        return None
+    
+    # Convert to homogeneous coordinates
+    # x1_h will be n x 3: [[x1, y1, 1], [x2, y2, 1], ...]
+    x1_h = np.hstack([x1, np.ones((n, 1))])
+    
+    # Set up the linear system to solve for affine parameters
+    # We want to solve: x2 = A * x1
+    # where A = [[a, b, tx],
+    #            [c, d, ty],
+    #            [0, 0, 1 ]]
+    #
+    # This gives us:
+    # x2_i = a*x1_i + b*y1_i + tx
+    # y2_i = c*x1_i + d*y1_i + ty
+    #
+    # We can write this as a linear system for each point:
+    # [x1_i  y1_i  1  0     0     0  ] [a ]   [x2_i]
+    # [0     0     0  x1_i  y1_i  1  ] [b ]   [y2_i]
+    #                                   [tx]
+    #                                   [c ]
+    #                                   [d ]
+    #                                   [ty]
+    
+    # Build matrix M (2n x 6) and vector b (2n x 1)
+    M = np.zeros((2*n, 6))
+    b = np.zeros((2*n, 1))
+    
+    for i in range(n):
+        # First row for x-coordinate
+        M[2*i, 0:3] = x1_h[i]      # [x1_i, y1_i, 1, 0, 0, 0]
+        # Second row for y-coordinate  
+        M[2*i+1, 3:6] = x1_h[i]    # [0, 0, 0, x1_i, y1_i, 1]
+        
+        b[2*i] = x2[i, 0]          # x2_i
+        b[2*i+1] = x2[i, 1]        # y2_i
+    
+    # Solve the linear system: M * params = b
+    # params = [a, b, tx, c, d, ty]^T
+    params, _, _, _ = np.linalg.lstsq(M, b, rcond=None)
+    params = params.flatten()
+    
+    # Construct the affine matrix
+    A = np.array([
+        [params[0], params[1], params[2]],
+        [params[3], params[4], params[5]],
+        [0,         0,         1        ]
+    ])
+    
+    return A
+
 
 # ----- Visualization Functions -----
 def visualize_find_match(img1, img2, x1, x2, img_h=500):
