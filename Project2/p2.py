@@ -125,64 +125,41 @@ def warp_image(img, A, output_size):
     h_out, w_out = output_size
     h_in, w_in = img.shape
     
-    # Step 1: Create a meshgrid of output pixel coordinates
-    # These are all the (x, y) positions in the output image we need to fill
-    # Note: meshgrid creates (y, x) coordinates
-    # x ranges from 0 to w_out-1, y ranges from 0 to h_out-1
+    # Create grid of (x, y) coordinates in output image 
     x_out, y_out = np.meshgrid(np.arange(w_out), np.arange(h_out))
-    
-    # Flatten to get list of all coordinates
-    # Shape: (h_out * w_out,)
-    x_out_flat = x_out.flatten()
-    y_out_flat = y_out.flatten()
-    
-    # Step 2: Convert to homogeneous coordinates
-    # Shape: (h_out * w_out, 3) where each row is [x, y, 1]
-    coords_out = np.stack([x_out_flat, y_out_flat, np.ones_like(x_out_flat)], axis=1)
-    
-    # Step 3: Apply INVERSE transformation to find source coordinates
-    # We want to know: for each output pixel, where did it come from in the input?
-    # source_coords = A^(-1) * output_coords
+
+    coords_out = np.vstack([
+        x_out.ravel(),
+        y_out.ravel(),
+        np.ones((h_out * w_out))
+    ])  # 3 x (h_out*w_out)
+
+    # Compute inverse mapping
     A_inv = np.linalg.inv(A)
+    coords_in = A_inv @ coords_out  # 3 x (h_out*w_out)
+
+    coords_in = coords_in[:2, :] / coords_in[2, :]  # Normalize homogeneous coordinates
+
+    x_in = coords_in[0, :]  # column coordinates
+    y_in = coords_in[1, :]  # row coordinates
     
-    # Transform all coordinates at once (matrix multiplication)
-    # coords_src shape: (h_out * w_out, 3)
-    coords_src = (A_inv @ coords_out.T).T
-    
-    # Extract x and y coordinates (ignore the homogeneous 1)
-    x_src = coords_src[:, 0] / coords_src[:, 2]
-    y_src = coords_src[:, 1] / coords_src[:, 2]
-    
-    # Step 4: Interpolate pixel values from source image
-    # interpn requires:
-    # - points: the grid coordinates of the input image
-    # - values: the input image
-    # - xi: the coordinates where we want to sample
-    
-    # Define the grid of the input image
-    # points[0] is y-coordinates (rows): [0, 1, 2, ..., h_in-1]
-    # points[1] is x-coordinates (cols): [0, 1, 2, ..., w_in-1]
+    # Define the grid for interpn (row, column)
     points = (np.arange(h_in), np.arange(w_in))
     
-    # The coordinates where we want to sample
-    # interpn expects (N, 2) array where each row is [y, x]
-    # Note: interpn uses (y, x) order, not (x, y)!
-    xi = np.stack([y_src, x_src], axis=1)
+    # Stack coordinates as (N, 2) in (row, col) order = (y, x) order
+    xi = np.column_stack([y_in, x_in])
     
-    # Perform bilinear interpolation
-    # 'linear' method does bilinear interpolation
-    # bounds_error=False allows extrapolation for out-of-bounds points
-    # fill_value=0 sets out-of-bounds pixels to 0 (black)
+    # Interpolate pixel values using interpn
     img_warped_flat = interpolate.interpn(
         points=points,
         values=img,
         xi=xi,
         method='linear',
         bounds_error=False,
-        fill_value=0
+        fill_value=0.0
     )
     
-    # Step 5: Reshape back to 2D image
+    # Reshape to output dimensions (NO -1 dimension!)
     img_warped = img_warped_flat.reshape((h_out, w_out))
 
     return img_warped
