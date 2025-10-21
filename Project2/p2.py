@@ -132,16 +132,15 @@ def warp_image(img, A, output_size):
         x_out.ravel(),
         y_out.ravel(),
         np.ones((h_out * w_out))
-    ])  # 3 x (h_out*w_out)
+    ])  # 3 x (h_out*w_out) <- shape of coords_out
 
     # Compute inverse mapping
     A_inv = np.linalg.inv(A)
-    coords_in = A_inv @ coords_out  # 3 x (h_out*w_out)
-
-    coords_in = coords_in[:2, :] / coords_in[2, :]  # Normalize homogeneous coordinates
-
-    x_in = coords_in[0, :]  # column coordinates
-    y_in = coords_in[1, :]  # row coordinates
+    coords_in = A @ coords_out  # 3 x N
+    
+    # Extract x and y coordinates (no division needed for affine)
+    x_in = coords_in[0, :]  # x coordinates in input image
+    y_in = coords_in[1, :]  # y coordinates in input image
     
     # Define the grid for interpn (row, column)
     points = (np.arange(h_in), np.arange(w_in))
@@ -156,18 +155,17 @@ def warp_image(img, A, output_size):
         xi=xi,
         method='linear',
         bounds_error=False,
-        fill_value=0.0
+        fill_value=0
     )
     
-    # Reshape to output dimensions (NO extra dimension for grayscale!)
+    # Reshape to output dimensions
     img_warped = img_warped_flat.reshape((h_out, w_out))
 
-    print("output size")
-    print(h_out, w_out)
+    # print("output size")
+    # print(np.meshgrid(np.arange(w_out), np.arange(h_out))[0].shape)
 
-    #img_warped size
-    print("img_warped size")
-    print(img_warped.shape)
+    # print("img_warped size")
+    # print(img_warped.shape)
 
     return img_warped
 
@@ -175,8 +173,6 @@ def warp_image(img, A, output_size):
 def align_image(template, target, A):
     A_refined = None
     errors = None
-
-    # To do
 
     A_refined = A.copy()
     errors = []
@@ -611,8 +607,8 @@ if __name__=='__main__':
     plt.axis('off')
     plt.show()
 
-    # A_refined, errors = align_image(template, target_list[1], A)
-    # visualize_align_image(template, target_list[1], A, A_refined, errors)
+    A_refined, errors = align_image(template, target_list[1], A)
+    visualize_align_image(template, target_list[1], A, A_refined, errors)
 
-    # A_list, errors_list = track_multi_frames(template, target_list)
-    # visualize_track_multi_frames(template, target_list, A_list, errors_list)
+    A_list, errors_list = track_multi_frames(template, target_list)
+    visualize_track_multi_frames(template, target_list, A_list, errors_list)
