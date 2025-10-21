@@ -123,69 +123,51 @@ def warp_image(img, A, output_size):
     img_warped = None
 
     h_out, w_out = output_size
-    h_in, w_in = img.shape[:2]
+    h_in, w_in = img.shape
     
-    # Step 1: Create mesh grid for output image coordinates
-    # Note: meshgrid returns (x, y) when indexing='xy' (default)
+    # Create grid of (x, y) coordinates in output image 
     x_out, y_out = np.meshgrid(np.arange(w_out), np.arange(h_out))
-    
-    # Step 2: Create homogeneous coordinates for all output pixels
-    # Shape: 3 x (h_out * w_out)
-    ones = np.ones(h_out * w_out)
+
     coords_out = np.vstack([
         x_out.ravel(),
         y_out.ravel(),
-        ones
-    ])
-    
-    # Step 3: Compute inverse transformation
+        np.ones((h_out * w_out))
+    ])  # 3 x (h_out*w_out)
+
+    # Compute inverse mapping
     A_inv = np.linalg.inv(A)
+    coords_in = A_inv @ coords_out  # 3 x (h_out*w_out)
+
+    coords_in = coords_in[:2, :] / coords_in[2, :]  # Normalize homogeneous coordinates
+
+    x_in = coords_in[0, :]  # column coordinates
+    y_in = coords_in[1, :]  # row coordinates
     
-    # Step 4: Map output coordinates to input coordinates
-    coords_in = A_inv @ coords_out
+    # Define the grid for interpn (row, column)
+    points = (np.arange(h_in), np.arange(w_in))
     
-    # Step 5: Convert from homogeneous coordinates
-    # Normalize by dividing by the third coordinate
-    x_in = coords_in[0, :] / coords_in[2, :]
-    y_in = coords_in[1, :] / coords_in[2, :]
+    # Stack coordinates as (N, 2) in (row, col) order = (y, x) order
+    xi = np.column_stack([y_in, x_in])
     
-    # Reshape to 2D arrays
-    x_in = x_in.reshape(h_out, w_out)
-    y_in = y_in.reshape(h_out, w_out)
+    # Interpolate pixel values using interpn
+    img_warped_flat = interpolate.interpn(
+        points=points,
+        values=img,
+        xi=xi,
+        method='linear',
+        bounds_error=False,
+        fill_value=0.0
+    )
     
-    # Step 6: Perform bilinear interpolation
-    # interpn expects points in (axis0, axis1) order, which for images is (y, x)
-    # The grid of valid coordinates in the source image
-    y_grid = np.arange(h_in)
-    x_grid = np.arange(w_in)
-    
-    # Query points must be in (y, x) order to match the grid
-    query_points = np.stack([y_in, x_in], axis=-1)
-    
-    if len(img.shape) == 2:
-        # Grayscale image
-        img_warped = interpolate.interpn(
-            (y_grid, x_grid),
-            img,
-            query_points,
-            method='linear',
-            bounds_error=False,
-            fill_value=0
-        )
-    else:
-        # Color image - interpolate each channel
-        num_channels = img.shape[2]
-        img_warped = np.zeros((h_out, w_out, num_channels))
-        
-        for c in range(num_channels):
-            img_warped[:, :, c] = interpolate.interpn(
-                (y_grid, x_grid),
-                img[:, :, c],
-                query_points,
-                method='linear',
-                bounds_error=False,
-                fill_value=0
-            )
+    # Reshape to output dimensions (NO extra dimension for grayscale!)
+    img_warped = img_warped_flat.reshape((h_out, w_out))
+
+    print("output size")
+    print(h_out, w_out)
+
+    #img_warped size
+    print("img_warped size")
+    print(img_warped.shape)
 
     return img_warped
 
@@ -464,37 +446,6 @@ def compute_affine_transform(x1, x2):
     
     return A
 
-def warp_image_alt(img, A, output_size):
-    img_warped = None
-
-    h_out, w_out = output_size
-    # Create grid of (x, y) coordinates in output image 
-    x_out, y_out = np.meshgrid(np.arange(w_out), np.arange(h_out))
-
-    coords_out = np.vstack([
-        x_out.ravel(),
-        y_out.ravel(),
-        np.ones((h_out * w_out))
-    ])  # 3 x (h_out*w_out)
-
-    # Compute inverse mapping
-    A_inv = np.linalg.inv(A)
-    coords_in = A_inv @ coords_out  # 3 x (h_out*w_out)
-
-    coords_in = coords_in[:2, :] / coords_in[2, :]  # Normalize homogeneous coordinates
-
-    x_in = coords_in[0, :].reshape((h_out, w_out))
-    y_in = coords_in[1, :].reshape((h_out, w_out))
-    
-    # Interpolate pixel values
-    interp_func = interpolate.RegularGridInterpolator(
-        (np.arange(img.shape[0]), np.arange(img.shape[1])), img, bounds_error=False, fill_value=0)
-    
-    img_warped = interp_func(np.stack([y_in, x_in], axis=-1))
-    img_warped = img_warped.reshape((h_out, w_out, -1))
-
-    return img_warped
-
 # ----- Visualization Functions -----
 def visualize_find_match(img1, img2, x1, x2, img_h=500):
     assert x1.shape == x2.shape, 'x1 and x2 should have same shape!'
@@ -660,8 +611,8 @@ if __name__=='__main__':
     plt.axis('off')
     plt.show()
 
-    A_refined, errors = align_image(template, target_list[1], A)
-    visualize_align_image(template, target_list[1], A, A_refined, errors)
+    # A_refined, errors = align_image(template, target_list[1], A)
+    # visualize_align_image(template, target_list[1], A, A_refined, errors)
 
-    A_list, errors_list = track_multi_frames(template, target_list)
-    visualize_track_multi_frames(template, target_list, A_list, errors_list)
+    # A_list, errors_list = track_multi_frames(template, target_list)
+    # visualize_track_multi_frames(template, target_list, A_list, errors_list)
