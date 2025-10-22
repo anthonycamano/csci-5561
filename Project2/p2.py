@@ -136,6 +136,8 @@ def warp_image(img, A, output_size):
 
     # Compute inverse mapping
     A_inv = np.linalg.inv(A)
+
+    ## ACTUALLY it seems that A is already the inverse so we dont have to invert it -.-
     coords_in = A @ coords_out  # 3 x N
     
     # Extract x and y coordinates (no division needed for affine)
@@ -169,205 +171,177 @@ def warp_image(img, A, output_size):
 
     return img_warped
 
-
 def align_image(template, target, A):
+    '''
+    Inverse Compositional Image Alignment
+    
+    Input: 
+        template - grayscale template image
+        target - grayscale target image
+        A - 3x3 initial affine transform (x_tgt = A * x_tpl)
+    
+    Output:
+        A_refined - refined 3x3 affine transform
+        errors - list of alignment errors (L2 norm) at each iteration
+    '''
     A_refined = None
     errors = None
 
-    A_refined = A.copy()
-    errors = []
-    
-    # Parameters for IC algorithm
-    max_iter = 200
+    ## parameters for ICIA
+    max_iters = 100
     epsilon = 0.001
     
-    # Affine parameterization: W(x;p) = [[p1+1, p2, p3], [p4, p5+1, p6], [0, 0, 1]] * x
-    # This means the current estimate of A is:
-    # A = [[p1+1, p2, p3],
-    #      [p4, p5+1, p6],
-    #      [0, 0, 1   ]]
-    # where p = [p1, p2, p3, p4, p5, p6]
+    # take p parameters from A -- se below for what A should look like, this was from notes
+    # A = | p1+1  p2    p3 |
+    #     | p4    p5+1  p6 |
+    #     | 0     0     1  |
+    p = np.array([A[0, 0] - 1, A[0, 1], A[0, 2],
+                  A[1, 0], A[1, 1] - 1, A[1, 2]])
     
-    # Initialize p from A
-    p = np.array([
-        A_refined[0, 0] - 1, A_refined[0, 1], A_refined[0, 2],
-        A_refined[1, 0], A_refined[1, 1] - 1, A_refined[1, 2]
-    ])
+    ## use sobel filters for x and y gradients
+    sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) / 8.0
+    sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) / 8.0
     
-    h, w = template.shape[:2]
-    
-    # 1. Compute the gradient of template image, Nabla I_tpl
-    # Sobel filter kernels
-    kernel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32) / 8
-    kernel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32) / 8
-    
-    # The project allows filter2D, so we'll use it on the template (I_tpl)
-    # The template is grayscale here based on the rest of the code, so filter2D works.
-    # Need to convert template to float before applying filter2D
-    I_tpl_float = template.astype(np.float32)
+    grad_x = filter2D(template.astype(np.float32), -1, sobel_x)
+    grad_y = filter2D(template.astype(np.float32), -1, sobel_y)
 
-    grad_I_tpl_x = filter2D(I_tpl_float, -1, kernel_x)
-    grad_I_tpl_y = filter2D(I_tpl_float, -1, kernel_y)
+    ## get Jacobian dW/dp at (x; 0)
+    h, w = template.shape
     
-    # 2. Compute the Jacobian dW/dp (dW/dp is constant for affine transform)
-    # Jacobian of W(x;p) w.r.t p at p=0 (for IC)
-    # x = [u, v, 1]^T, W(x;p) = [ (p1+1)u + p2*v + p3 ], [ p4*u + (p5+1)v + p6 ]
-    # The Jacobian dW/dp (a 2 x 6 matrix for each point) is:
-    # [[u, v, 1, 0, 0, 0],
-    #  [0, 0, 0, u, v, 1]]
-    
+    ## Create coordinate grids
     u, v = np.meshgrid(np.arange(w), np.arange(h))
+    u = u.flatten()
+    v = v.flatten()
     
-    # Reshape u, v to column vectors (H*W x 1)
-    u_flat = u.ravel()
-    v_flat = v.ravel()
-    N = h * w
+    ## Number of pixels
+    n_pixels = h * w
     
-    # 3. Compute the steepest descent images: Nabla I_tpl * dW/dp
-    # Nabla I_tpl is (N x 2): [[dI/du, dI/dv], ...]
-    grad_I_tpl = np.stack([grad_I_tpl_x.ravel(), grad_I_tpl_y.ravel()], axis=1)
+    ## Jacobian for all pixels: shape (n_pixels, 2, 6)
+    ## For each pixel, we have a 2x6 matrix
+    jacobian = np.zeros((n_pixels, 2, 6))
+    jacobian[:, 0, 0] = u  # ∂x/∂p1
+    jacobian[:, 0, 1] = v  # ∂x/∂p2
+    jacobian[:, 0, 2] = 1  # ∂x/∂p3
+    jacobian[:, 1, 3] = u  # ∂y/∂p4
+    jacobian[:, 1, 4] = v  # ∂y/∂p5
+    jacobian[:, 1, 5] = 1  # ∂y/∂p6
     
-    # dW/dp is (N x 2 x 6) if built per-point, but easier to do matrix multiplication:
-    # SteepestDescent = Nabla I_tpl @ dW/dp (where dW/dp is linearized)
-    # SteepestDescent is (N x 6)
+    ## compute steepest descent images
+    ## flatten gradients
+    grad_x_flat = grad_x.flatten()  # shape: (n_pixels,)
+    grad_y_flat = grad_y.flatten()  # shape: (n_pixels,)
     
-    # Building the dW/dp matrix for all points (2N x 6) for linear system, 
-    # but here we need a structure that allows (2x6) for each point.
+    ## for each pixel, compute: [grad_x, grad_y] * jacobian (2x6 matrix)
+    ## result: (n_pixels, 6) matrix
+    steepest_descent = np.zeros((n_pixels, 6))
+    for i in range(n_pixels):
+        grad_i = np.array([grad_x_flat[i], grad_y_flat[i]])
+        steepest_descent[i, :] = grad_i @ jacobian[i, :, :]
     
-    # Let's use the explicit formula for Steepest Descent Images (SDI) which is (N x 6)
-    SDI = np.zeros((N, 6))
+    ## cpmute hessiam
+    H = steepest_descent.T @ steepest_descent  # (6, n_pixels) @ (n_pixels, 6) = (6, 6)
     
-    # SDI[i, j] = [dI/du * du/dpj + dI/dv * dv/dpj]
-    # For p1 (j=0): dI/du * u + dI/dv * 0  (since du/dp1=u, dv/dp1=0)
-    SDI[:, 0] = grad_I_tpl[:, 0] * u_flat
-    # For p2 (j=1): dI/du * v + dI/dv * 0
-    SDI[:, 1] = grad_I_tpl[:, 0] * v_flat
-    # For p3 (j=2): dI/du * 1 + dI/dv * 0
-    SDI[:, 2] = grad_I_tpl[:, 0] * 1
-    # For p4 (j=3): dI/du * 0 + dI/dv * u
-    SDI[:, 3] = grad_I_tpl[:, 1] * u_flat
-    # For p5 (j=4): dI/du * 0 + dI/dv * v
-    SDI[:, 4] = grad_I_tpl[:, 1] * v_flat
-    # For p6 (j=5): dI/du * 0 + dI/dv * 1
-    SDI[:, 5] = grad_I_tpl[:, 1] * 1
+    ## iterative part of the function
+    errors = []
     
-    # 4. Compute the 6x6 Hessian: H = sum(SDI.T @ SDI)
-    H = SDI.T @ SDI
-    
-    # Inverse Compositional Loop
-    for i in range(max_iter):
+    for iteration in range(max_iters):
+        # Convert current parameters to affine matrix
+        A_current = params_to_affine(p)
         
-        # Current A_refined from p (x_tgt = A_refined * x_tpl)
-        A_refined[0, :] = [p[0] + 1, p[1], p[2]]
-        A_refined[1, :] = [p[3], p[4] + 1, p[5]]
+        img_warped = warp_image(target, A_current, template.shape)
         
-        # a. Warp the target to the template domain I_tgt(W(x;p))
-        I_warped = warp_image(target, A_refined, template.shape)
+        I_err = img_warped - template
         
-        # b. Compute the error image I_err = I_tgt(W(x;p)) - I_tpl
-        # Note: template is uint8, I_warped is float.
-        I_err = I_warped.astype(np.float32) - template.astype(np.float32)
+        ## error
+        error_norm = np.sqrt(np.mean(I_err ** 2)) / 255.0  # Normalize by 255
+        errors.append(error_norm)
         
-        # c. Compute F = sum(SDI.T @ I_err)
-        # I_err_flat is (N x 1)
-        I_err_flat = I_err.ravel()
+        I_err_flat = I_err.flatten()  # shape: (n_pixels,)
+        F = steepest_descent.T @ I_err_flat  # (6, n_pixels) @ (n_pixels,) = (6,)
         
-        # F is (6 x 1)
-        F = SDI.T @ I_err_flat
+        delta_p = np.linalg.solve(H, F)  # More stable than inv(H) @ F
         
-        # d. Compute delta_p = H^-1 * F
-        try:
-            delta_p = np.linalg.solve(H, F)
-        except np.linalg.LinAlgError:
-            # If H is singular, stop
-            break
+        A_delta = params_to_affine(delta_p)
         
-        # Record error (L2 norm of the residual)
-        error = np.linalg.norm(I_err_flat)
-        errors.append(error)
+        # Invert A_delta
+        A_delta_inv = np.linalg.inv(A_delta)
         
-        # e. Check convergence
+        A_new = A_current @ A_delta_inv
+        
+        # Extract parameters from new affine matrix
+        p = np.array([A_new[0, 0] - 1, A_new[0, 1], A_new[0, 2],
+                      A_new[1, 0], A_new[1, 1] - 1, A_new[1, 2]])
+        
+        # Step 12: Check with epsilon -- why do this? adding cause it was in fake code
         if np.linalg.norm(delta_p) < epsilon:
             break
-            
-        # f. Update W(x;p) <- W(x;p) * W_inv(x; delta_p)
-        # Update A_refined: A_new = A_current @ A_inv(delta_p)
-        
-        # Construct A_inv(delta_p) = A_comp (A_new = A_current @ A_comp_inv)
-        # where A_comp is the compositional update: A_comp = [[dp1+1, dp2, dp3], [dp4, dp5+1, dp6], [0, 0, 1]]
-        A_comp = np.array([
-            [delta_p[0] + 1, delta_p[1], delta_p[2]],
-            [delta_p[3], delta_p[4] + 1, delta_p[5]],
-            [0, 0, 1]
-        ])
-        
-        # The update rule in the algorithm is W(x;p) <- W(x;p) * W_inv(x; delta_p)
-        # In matrix terms: A_new = A_current @ A_comp_inv
-        A_comp_inv = np.linalg.inv(A_comp)
-        A_refined = A_refined @ A_comp_inv
-        
-        # Extract new p from A_refined (for the next iteration)
-        p = np.array([
-            A_refined[0, 0] - 1, A_refined[0, 1], A_refined[0, 2],
-            A_refined[1, 0], A_refined[1, 1] - 1, A_refined[1, 2]
-        ])
+    
+    A_refined = params_to_affine(p)
+    errors = np.array(errors)
     
     return A_refined, errors
 
 def track_multi_frames(template, img_list):
+    '''
+    Track template across multiple frames using inverse compositional alignment
+    
+    Input:
+        template - grayscale template image (from first frame)
+        img_list - list of consecutive grayscale images [img0, img1, img2, img3]
+    
+    Output:
+        A_list - list of affine transforms from template to each frame
+        errors_list - list of error arrays (one per frame) across iterations
+    '''
+
     A_list = None
     errors_list = None
 
-    # Initialize A for the first frame using SIFT/RANSAC
-    img1 = img_list[0]
-    x1, x2 = find_match(template, img1)
-    
-    # Use recommended RANSAC parameters
-    # The visualization suggests a threshold of about 5-10 pixels for features. 
-    # A robust choice based on common practice is:
-    ransac_thr = 5.0
+    ## parameters for RANSAC
+    ransac_thr = 3.0
     ransac_iter = 1000
-    
-    A_init = align_image_using_feature(x1, x2, ransac_thr, ransac_iter)
     
     A_list = []
     errors_list = []
     
-    # Tracking starts from the first frame.
-    A_prev = A_init
+    original_template = template.copy()
     
-    # The loop should track each frame in img_list starting from the first one.
+    ## current template (will be updated after each frame)
+    current_template = template.copy()
+    
+    ## initial Affine matrix
+    A_prev = None
+    
     for i, target_img in enumerate(img_list):
-        # Initial estimate for the current frame is the refined result from the previous frame.
-        # For frame 1, the "previous frame" is the SIFT/RANSAC result (A_init).
-        A_current = A_prev
+        print(f"Processing frame {i+1}/{len(img_list)}...")
         
-        # Refine the alignment using Inverse Compositional (IC)
-        A_refined, errors = align_image(template, target_img, A_current)
+        if i == 0:
+            ## FIRST FRAME: Use feature matching + RANSAC
+            print("  Using feature matching for initialization...")
+            
+            x1, x2 = find_match(current_template, target_img)
+            
+            A_init = align_image_using_feature(x1, x2, ransac_thr, ransac_iter)
+            
+        else:
+            ## after initial frame, use previous A as init
+            A_init = A_prev.copy()
+        
+        ## refine with ICIA
+        A_refined, errors = align_image(current_template, target_img, A_init)
         
         A_list.append(A_refined)
         errors_list.append(errors)
         
-        # Update A_prev for the next iteration (next frame)
-        A_prev = A_refined
+        ## update the template for next frame
+        if i < len(img_list) - 1:  # Don't need to update after last frame
+            current_template = warp_image(target_img, A_refined, current_template.shape)
+
+            ## formattins
+            # current_template = np.clip(current_template, 0, 255).astype(np.uint8)
         
-        # NOTE: The requirement says: "template needs to be updated at every frame, 
-        # i.e., template <- warp_image(img, A, template.shape)." 
-        # This describes an *adaptive template* or *forward* tracking model.
-        # However, the standard IC method tracks the *first template* to subsequent frames.
-        # Given the instruction in the text: "Given a template and a set of consecutive images, 
-        # you will... track over frames using the inverse compositional image alignment,"
-        # and the visualization which shows the template boundary tracked in ALL frames, 
-        # the simplest and most common interpretation is tracking against the *original* template.
-        # Given the ambiguity, I will implement the **simple tracking** (original template) 
-        # but add the code for the **adaptive template** in a comment.
-        
-        # Adaptive Template Model (Uncomment if needed based on project test cases):
-        # if i < len(img_list) - 1:
-        #     template = warp_image(target_img, A_refined, template.shape)
-        #     # Re-initialize A_prev for the next iteration: A_prev = Identity 
-        #     # (since the template is now warped to match the current frame)
-        #     A_prev = np.eye(3)
+        # Save current affine for next frame's initialization
+        A_prev = A_refined.copy()
 
     return A_list, errors_list
 
@@ -440,6 +414,24 @@ def compute_affine_transform(x1, x2):
         [0,         0,         1        ]
     ])
     
+    return A
+
+def params_to_affine(p):
+    """
+    Convert 6 parameters to 3x3 affine transformation matrix
+    
+    p = [p1, p2, p3, p4, p5, p6]
+    
+    A = | p1+1  p2    p3 |
+        | p4    p5+1  p6 |
+        | 0     0     1  |
+    """
+    A = np.array([
+        [p[0] + 1, p[1], p[2]],
+        [p[3], p[4] + 1, p[5]],
+        [0, 0, 1]
+    ])
+
     return A
 
 # ----- Visualization Functions -----
